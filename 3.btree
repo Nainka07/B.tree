@@ -1,0 +1,588 @@
+// 나상터그터흐_20243048 BT.cpp
+// B-Tree implementation (no STL). Uses C stdio for IO.
+// Compile: g++ -std=c++17 나상터그터흐_20243048\ BT.cpp -o BT
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+struct Node {
+    int *keys;       // array of keys (length: m-1)
+    Node **children; // array of child pointers (length: m)
+    int size;        // number of keys currently in node
+    Node(int m)
+        keys = (int*)malloc(sizeof(int)*(m-1));
+        children = (Node**)malloc(sizeof(Node*)*m);
+        for (int i=0;i<m;i++) children[i]=NULL;
+        size = 0;
+    }
+    ~Node() {
+        free(keys);
+        free(children);
+    }
+};
+
+typedef Node* BT;
+
+static int GLOBAL_M = 4; // default; can be set by input
+
+// Helper: allocate node
+Node* newNode(int m) { return new Node(m); }
+
+// searchPath(T, m, key, stack)
+// - Fill stack with path from root to the node where key should be or found.
+// - Return index of node in stack (stack[depth] is last filled). Depth starts at 0.
+// - Also return position where key found via out parameters if needed.
+int searchPath(BT root, int m, int key, Node** stack, int *posFound) {
+    int depth=0;
+    Node* cur = root;
+    *posFound = -1;
+    if (!cur) return 0;
+    while (cur) {
+        stack[depth++] = cur;
+        // find first key >= key or end
+        int i=0;
+        while (i < cur->size && cur->keys[i] < key) i++;
+        if (i < cur->size && cur->keys[i] == key) {
+            *posFound = i;
+            return depth;
+        }
+        // go to child i
+        if (cur->children[i]) {
+            cur = cur->children[i];
+        } else {
+            return depth;
+        }
+    }
+    return depth;
+}
+
+// Utility: find index in node where key should be inserted (0..size)
+int findInsertPos(Node* node, int key) {
+    int i=0;
+    while (i < node->size && node->keys[i] < key) i++;
+    return i;
+}
+
+// insertKey(T, m, x, y, newKey)
+// Here x is Node* where we insert newKey, y not used in this signature adaptation.
+// We'll implement insertion into node x (assume node not full) - shift keys to insert.
+void insertKey(Node* x, int m, int newKey) {
+    int i = x->size - 1;
+    while (i >= 0 && x->keys[i] > newKey) {
+        x->keys[i+1] = x->keys[i];
+        i--;
+    }
+    x->keys[i+1] = newKey;
+    x->size++;
+}
+
+// splitNode(T, m, x, y, newKey)
+// For simplicity we'll split a full child when needed in InsertBT process.
+// We implement splitChild(parent, idx) semantics: split parent->children[idx] into two.
+void splitChild(Node* parent, int m, int idx) {
+    Node* full = parent->children[idx];
+    int t = (m+1)/2; // min children (ceil(m/2))
+    int median_index = t-1; // index in keys that moves up
+    Node* right = newNode(m);
+    // right gets keys after median_index
+    int right_keys = full->size - (median_index+1);
+    for (int j=0;j<right_keys;j++) {
+        right->keys[j] = full->keys[median_index+1 + j];
+    }
+    right->size = right_keys;
+    // move children pointers if full had children
+    if (full->children[0] != NULL) {
+        // full had children; redistribute them
+        for (int j=0;j<=right_keys;j++) {
+            right->children[j] = full->children[median_index+1 + j];
+            full->children[median_index+1 + j] = NULL;
+        }
+    }
+    // shrink full node
+    full->size = median_index;
+    // insert new child pointer into parent at idx+1
+    for (int j=parent->size;j>=idx+1;j--) parent->children[j+1] = parent->children[j];
+    parent->children[idx+1] = right;
+    // move parent's keys to make space
+    for (int j=parent->size-1;j>=idx;j--) parent->keys[j+1] = parent->keys[j];
+    parent->keys[idx] = full->keys[median_index];
+    parent->size++;
+}
+
+// InsertBT(T, m, key)
+void InsertBT(BT &root, int m, int key) {
+    if (!root) {
+        root = newNode(m);
+        root->keys[0] = key;
+        root->size = 1;
+        return;
+    }
+    Node* stack[1024];
+    int posFound;
+    int depth = searchPath(root, m, key, stack, &posFound);
+    if (posFound != -1) {
+        // key exists -> error; caller prints error
+        return;
+    }
+    // find leaf where to insert
+    Node* leaf = stack[depth-1];
+    // if leaf not full, insert
+    if (leaf->size < m-1) {
+        insertKey(leaf, m, key);
+        return;
+    }
+    // Else need to handle splits on path from root to leaf.
+    // Standard approach: if root is full, split it first.
+    if (root->size == m-1) {
+        Node* s = newNode(m);
+        s->children[0] = root;
+        root = s;
+        splitChild(s, m, 0);
+    }
+    // Now traverse from root, splitting full children when necessary, until leaf
+    Node* cur = root;
+    while (true) {
+        int i = findInsertPos(cur, key);
+        if (cur->children[i] == NULL) {
+            // cur is leaf (or child empty) -> insert into cur (cur may not be leaf of original)
+            if (cur->size < m-1) {
+                insertKey(cur, m, key);
+                return;
+            } else {
+                // node full (shouldn't happen due to splits on the way), but handle:
+                splitChild(cur /* parent? */, m, 0); // fallback (not ideal)
+                // try again
+            }
+        } else {
+            // if child is full, split before descending
+            if (cur->children[i]->size == m-1) {
+                splitChild(cur, m, i);
+                // after split, decide which of the two children to go
+                if (key > cur->keys[i]) i++;
+            }
+            cur = cur->children[i];
+        }
+    }
+}
+
+// ---------- Deletion support functions ----------
+
+// locate key in subtree rooted at x, return node pointer and index; if not found return NULL
+Node* nodeFind(Node* root, int m, int key, int *indexOut) {
+    Node* cur = root;
+    while (cur) {
+        int i=0;
+        while (i < cur->size && cur->keys[i] < key) i++;
+        if (i < cur->size && cur->keys[i] == key) {
+            *indexOut = i;
+            return cur;
+        }
+        if (cur->children[i]) cur = cur->children[i];
+        else break;
+    }
+    return NULL;
+}
+
+// helper find predecessor key (rightmost in subtree children[i])
+int predecessor(Node* node, int m, int idx) {
+    Node* cur = node->children[idx];
+    while (cur->children[cur->size] != NULL) {
+        // find rightmost child: index = cur->size
+        cur = cur->children[cur->size];
+    }
+    return cur->keys[cur->size-1];
+}
+
+// helper find successor key (leftmost in subtree children[idx+1])
+int successor(Node* node, int m, int idx) {
+    Node* cur = node->children[idx+1];
+    while (cur->children[0] != NULL) {
+        cur = cur->children[0];
+    }
+    return cur->keys[0];
+}
+
+// bestSibling(T,m,x,y)
+// Given node x which is child index y of its parent, find best sibling index (left or right) for redistribution/merge
+int bestSibling(Node* parent, int m, int x_index) {
+    // choose sibling with enough keys for redistribution if possible,
+    // otherwise prefer left if exists, else right.
+    if (x_index-1 >= 0 && parent->children[x_index-1]->size > (m-1)/2 - 1) return x_index-1;
+    if (x_index+1 <= parent->size && parent->children[x_index+1]->size > (m-1)/2 - 1) return x_index+1;
+    if (x_index-1 >= 0) return x_index-1;
+    return x_index+1;
+}
+
+// redistributeKeys(T, m, parent, x_index, sib_index)
+void redistributeKeys(Node* parent, int m, int x_index, int sib_index) {
+    Node* x = parent->children[x_index];
+    Node* s = parent->children[sib_index];
+    if (sib_index < x_index) {
+        // left sibling
+        // shift keys in x right by 1
+        for (int i=x->size-1;i>=0;i--) x->keys[i+1] = x->keys[i];
+        // if x had children, shift them too
+        if (x->children[0] != NULL) {
+            for (int i=x->size;i>=0;i--) x->children[i+1] = x->children[i];
+        }
+        // move parent's separating key down to x->keys[0]
+        x->keys[0] = parent->keys[sib_index];
+        x->size++;
+        // move s's rightmost key up to parent
+        parent->keys[sib_index] = s->keys[s->size-1];
+        // move s's rightmost child to x's leftmost child if exists
+        if (s->children[0] != NULL) {
+            x->children[0] = s->children[s->size];
+            s->children[s->size] = NULL;
+        }
+        s->size--;
+    } else {
+        // right sibling
+        // move parent's separating key down to x->keys[x->size]
+        x->keys[x->size] = parent->keys[x_index];
+        x->size++;
+        // move s's leftmost key up to parent
+        parent->keys[x_index] = s->keys[0];
+        // shift s's keys left
+        for (int i=0;i<s->size-1;i++) s->keys[i] = s->keys[i+1];
+        // if children exist, move leftmost child of s to become rightmost child of x
+        if (s->children[0] != NULL) {
+            x->children[x->size] = s->children[0];
+            // shift children of s left
+            for (int i=0;i<s->size;i++) s->children[i] = s->children[i+1];
+            s->children[s->size] = NULL;
+        }
+        s->size--;
+    }
+}
+
+// mergeNode(T,m,parent,x_index,sib_index)
+// merge child at x_index and sibling at sib_index and move parent's separating key down
+void mergeNode(Node* parent, int m, int x_index, int sib_index) {
+    // ensure x_index < sib_index for simplicity
+    int L = x_index < sib_index ? x_index : sib_index;
+    int R = (L == x_index) ? sib_index : x_index;
+    Node* left = parent->children[L];
+    Node* right = parent->children[R];
+    // move parent's key at L into left
+    left->keys[left->size] = parent->keys[L];
+    left->size++;
+    // move keys from right to left
+    for (int i=0;i<right->size;i++) {
+        left->keys[left->size + i] = right->keys[i];
+    }
+    // move children
+    if (right->children[0] != NULL) {
+        for (int i=0;i<=right->size;i++) {
+            left->children[left->size + i] = right->children[i];
+        }
+    }
+    left->size += right->size;
+    // free right
+    delete right;
+    // remove key from parent and child pointer
+    for (int i=L;i<parent->size-1;i++) parent->keys[i] = parent->keys[i+1];
+    for (int i=R;i<parent->size;i++) parent->children[i] = parent->children[i+1];
+    parent->children[parent->size] = NULL;
+    parent->size--;
+}
+
+// deleteKey(T, m, x, oldkey)
+// We'll implement deleteBT using standard algorithm with redistribution/merge
+void deleteBT(BT &root, int m, int key); // forward
+
+// Helper: ensure child has at least minKeys before descending
+void ensureChildHasEnough(Node* parent, int m, int idx) {
+    int minKeys = (m+1)/2 - 1; // ceil(m/2)-1
+    Node* child = parent->children[idx];
+    if (!child) return;
+    if (child->size >= minKeys) return;
+    // try left sibling
+    if (idx-1 >= 0 && parent->children[idx-1]->size > minKeys) {
+        // redistribute from left
+        Node* left = parent->children[idx-1];
+        // shift child keys right
+        for (int i=child->size-1;i>=0;i--) child->keys[i+1] = child->keys[i];
+        // shift children if any
+        if (child->children[0] != NULL) {
+            for (int i=child->size;i>=0;i--) child->children[i+1] = child->children[i];
+        }
+        // move parent's separating key down
+        child->keys[0] = parent->keys[idx-1];
+        // move left's last child to child's first child if children exist
+        if (left->children[0] != NULL) {
+            child->children[0] = left->children[left->size];
+            left->children[left->size] = NULL;
+        }
+        child->size++;
+        // move left's last key up
+        parent->keys[idx-1] = left->keys[left->size-1];
+        left->size--;
+        return;
+    }
+    // try right sibling
+    if (idx+1 <= parent->size && parent->children[idx+1]->size > minKeys) {
+        Node* right = parent->children[idx+1];
+        // move parent's separating key down to child's last
+        child->keys[child->size] = parent->keys[idx];
+        if (child->children[0] != NULL) {
+            child->children[child->size+1] = right->children[0];
+            // shift right children left
+            for (int i=0;i<right->size;i++) right->children[i] = right->children[i+1];
+            right->children[right->size] = NULL;
+        }
+        child->size++;
+        // move right's first key up
+        parent->keys[idx] = right->keys[0];
+        // shift right's keys left
+        for (int i=0;i<right->size-1;i++) right->keys[i] = right->keys[i+1];
+        right->size--;
+        return;
+    }
+    // else merge with a sibling (prefer left if exists)
+    if (idx-1 >= 0) {
+        mergeNode(parent, m, idx-1, idx);
+    } else {
+        mergeNode(parent, m, idx, idx+1);
+    }
+}
+
+// delete recursive function
+void deleteRec(Node* &root, int m, int key) {
+    if (!root) return;
+    int idx=0;
+    while (idx < root->size && key > root->keys[idx]) idx++;
+    if (idx < root->size && root->keys[idx] == key) {
+        // key found in this node at idx
+        if (root->children[idx] == NULL) {
+            // leaf: remove key
+            for (int i=idx;i<root->size-1;i++) root->keys[i] = root->keys[i+1];
+            root->size--;
+            return;
+        } else {
+            // internal node: replace by predecessor or successor
+            int minKeys = (m+1)/2 - 1;
+            // if left child has at least minKeys+1 keys, replace with predecessor
+            if (root->children[idx]->size >= minKeys+1) {
+                // find predecessor
+                Node* cur = root->children[idx];
+                while (cur->children[cur->size] != NULL) cur = cur->children[cur->size];
+                int pred = cur->keys[cur->size-1];
+                root->keys[idx] = pred;
+                // delete pred recursively
+                deleteRec(root->children[idx], m, pred);
+            } else if (root->children[idx+1]->size >= minKeys+1) {
+                int succ;
+                Node* cur = root->children[idx+1];
+                while (cur->children[0] != NULL) cur = cur->children[0];
+                succ = cur->keys[0];
+                root->keys[idx] = succ;
+                deleteRec(root->children[idx+1], m, succ);
+            } else {
+                // both children have minKeys -> merge them and then delete from merged child
+                mergeNode(root, m, idx, idx+1);
+                deleteRec(root->children[idx], m, key);
+            }
+            return;
+        }
+    } else {
+        // key not in this node; descend to child idx
+        if (root->children[idx] == NULL) {
+            // not found
+            return;
+        }
+        // ensure child has enough keys
+        int minKeys = (m+1)/2 - 1;
+        if (root->children[idx]->size == minKeys) {
+            // need to fix before descending
+            // try redistribution or merge
+            if (idx-1 >= 0 && root->children[idx-1]->size > minKeys) {
+                // borrow from left
+                Node* left = root->children[idx-1];
+                Node* child = root->children[idx];
+                // shift child keys right
+                for (int i=child->size-1;i>=0;i--) child->keys[i+1] = child->keys[i];
+                if (child->children[0] != NULL) {
+                    for (int i=child->size;i>=0;i--) child->children[i+1] = child->children[i];
+                }
+                child->keys[0] = root->keys[idx-1];
+                if (left->children[0] != NULL) {
+                    child->children[0] = left->children[left->size];
+                    left->children[left->size] = NULL;
+                }
+                child->size++;
+                root->keys[idx-1] = left->keys[left->size-1];
+                left->size--;
+            } else if (idx+1 <= root->size && root->children[idx+1]->size > minKeys) {
+                // borrow from right
+                Node* right = root->children[idx+1];
+                Node* child = root->children[idx];
+                child->keys[child->size] = root->keys[idx];
+                if (child->children[0] != NULL) {
+                    child->children[child->size+1] = right->children[0];
+                    for (int i=0;i<right->size;i++) right->children[i] = right->children[i+1];
+                    right->children[right->size] = NULL;
+                }
+                child->size++;
+                root->keys[idx] = right->keys[0];
+                for (int i=0;i<right->size-1;i++) right->keys[i] = right->keys[i+1];
+                right->size--;
+            } else {
+                // merge with a sibling
+                if (idx-1 >= 0) {
+                    mergeNode(root, m, idx-1, idx);
+                    idx = idx-1;
+                } else {
+                    mergeNode(root, m, idx, idx+1);
+                }
+            }
+        }
+        // root->children[idx] now has at least minKeys+1 keys or merged; descend
+        deleteRec(root->children[idx], m, key);
+        // if root became empty (no keys), adjust root
+        if (root->size == 0) {
+            Node* old = root;
+            if (root->children[0]) {
+                root = root->children[0];
+            } else {
+                root = NULL;
+            }
+            // free old
+            delete old;
+        }
+    }
+}
+
+// deleteBT(T,m,key) wrapper
+void deleteBT(BT &root, int m, int key) {
+    if (!root) return;
+    // check existence
+    int idx;
+    Node* found = nodeFind(root, m, key, &idx);
+    if (!found) {
+        return; // caller will print error
+    }
+    deleteRec(root, m, key);
+}
+
+// inorder traversal printing with required format
+void norder_print(Node* node, int m) {
+    if (!node) {
+        // print empty representation "< >"? Based on sample, initial empty prints "< >"
+        printf("< >\n");
+        return;
+    }
+    // We'll print node representation recursively without newline; caller prints newline at end for whole root
+    // But per spec after each command we should print the whole tree as one line containing the representation.
+    // So we'll implement a wrapper that prints tree and newline.
+    // To support nesting, define internal recursive lambda-like function (use static helper).
+}
+
+// Helper recursive printer that writes to stdout in nested form
+void printNodeRec(Node* node) {
+    if (!node) {
+        printf("< >");
+        return;
+    }
+    printf("<");
+    // For i in 0..size-1: print child i, then space, then key i
+    for (int i=0;i<node->size;i++) {
+        // print space
+        printf(" ");
+        if (node->children[i]) {
+            printNodeRec(node->children[i]);
+        }
+        // after possible child, print space then key
+        printf(" %d", node->keys[i]);
+    }
+    // finally print last child
+    printf(" ");
+    if (node->children[node->size]) {
+        printNodeRec(node->children[node->size]);
+    }
+    printf(" >");
+}
+
+// wrapper to print whole tree with newline
+void norder(Node* root, int m) {
+    if (!root) {
+        printf("< >\n");
+        return;
+    }
+    printNodeRec(root);
+    printf("\n");
+}
+
+// clear(T,m): free whole tree
+void clearRec(Node* node, int m) {
+    if (!node) return;
+    for (int i=0;i<=node->size;i++) {
+        if (node->children[i]) {
+            clearRec(node->children[i], m);
+            node->children[i] = NULL;
+        }
+    }
+    delete node;
+}
+
+void clearBT(BT &root, int m) {
+    if (!root) return;
+    clearRec(root, m);
+    root = NULL;
+}
+
+// ---- Main: read M (optional) and commands, run ----
+
+int main() {
+    // Read M from input first line optionally.
+    // Problem statement: "M 값을 사용자가 원하는 값을 할당할 수 있도록 구현" -> let's read an integer M at program start if provided.
+    // We'll attempt to read an integer first; if EOF or invalid, fallback to GLOBAL_M = 4.
+    int mtemp;
+    if (scanf("%d", &mtemp) == 1) {
+        if (mtemp >= 3) GLOBAL_M = mtemp;
+    } else {
+        // no M provided: default 4
+        GLOBAL_M = 4;
+        // clear stdin error (we may be at start of commands). Reset file position not possible; but since scanf didn't match int,
+        // the next input will be the first command char; to read that we should clear the stream.
+        clearerr(stdin);
+    }
+
+    BT root = NULL;
+    char cmd;
+    int key;
+    // Read commands until EOF. Commands are lines like "i 25" or "d 100"
+    // Use while(scanf(" %c %d", &cmd, &key) == 2)
+    while (true) {
+        int rc = scanf(" %c %d", &cmd, &key);
+        if (rc != 2) break;
+        if (cmd == 'i') {
+            // check existence
+            int idx;
+            if (nodeFind(root, GLOBAL_M, key, &idx)) {
+                // error: exists
+                fprintf(stderr, "i %d: The key already exists\n", key);
+                // still print current tree state
+                norder(root, GLOBAL_M);
+            } else {
+                InsertBT(root, GLOBAL_M, key);
+                norder(root, GLOBAL_M);
+            }
+        } else if (cmd == 'd') {
+            int idx;
+            if (!nodeFind(root, GLOBAL_M, key, &idx)) {
+                fprintf(stderr, "d %d: The key does not exist\n", key);
+                norder(root, GLOBAL_M);
+            } else {
+                deleteBT(root, GLOBAL_M, key);
+                norder(root, GLOBAL_M);
+            }
+        } else {
+            // ignore unknown commands
+        }
+    }
+
+    // clean up
+    clearBT(root, GLOBAL_M);
+    return 0;
+}
